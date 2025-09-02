@@ -9,4 +9,6 @@ cloudinary
 requests
 PyJWT
 fastapi-mail
+python-multipart
+
 
