@@ -8,3 +8,5 @@ email-validator
 cloudinary
 requests
 PyJWT
+fastapi-mail
+
