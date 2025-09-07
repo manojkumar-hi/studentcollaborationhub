@@ -21,3 +21,4 @@ class PostOut(BaseModel):
     image: Optional[str] = None
     created_at: datetime
     comments: List[Comment] = []
+    likes: List[str] = []  # Add likes field for frontend
