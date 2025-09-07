@@ -88,14 +88,12 @@ async def create_post(
         created_at=post_doc["created_at"],
         comments=[]
     )
-
 @router.get("/", response_model=List[PostOut])
 def get_posts():
     posts = list(db.posts.find().sort("created_at", -1))
     result = []
-     for post in posts:
+    for post in posts:   # <-- fixed indentation
         like_count = len(post.get("likes", []))
-        # Optionally, get current user from request context if available
         result.append({
             "id": str(post["_id"]),
             "user_id": post["user_id"],
@@ -106,8 +104,7 @@ def get_posts():
             "created_at": post["created_at"],
             "comments": [Comment(**c) for c in post.get("comments", [])],
             "like_count": like_count,
-            "likes": post.get("likes", []),  # Add likes array for frontend
-            # "liked_by_current_user": ... (frontend can check this if needed)
+            "likes": post.get("likes", []),
         })
     return result
 
