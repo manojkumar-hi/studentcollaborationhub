@@ -93,7 +93,7 @@ async def create_post(
 def get_posts():
     posts = list(db.posts.find().sort("created_at", -1))
     result = []
-    for post in posts:
+     for post in posts:
         like_count = len(post.get("likes", []))
         # Optionally, get current user from request context if available
         result.append({
@@ -106,6 +106,7 @@ def get_posts():
             "created_at": post["created_at"],
             "comments": [Comment(**c) for c in post.get("comments", [])],
             "like_count": like_count,
+            "likes": post.get("likes", []),  # Add likes array for frontend
             # "liked_by_current_user": ... (frontend can check this if needed)
         })
     return result
