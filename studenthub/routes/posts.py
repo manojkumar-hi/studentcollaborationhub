@@ -94,18 +94,17 @@ def get_posts():
     result = []
     for post in posts:   # <-- fixed indentation
         like_count = len(post.get("likes", []))
-        result.append({
-            "id": str(post["_id"]),
-            "user_id": post["user_id"],
-            "user_name": post["user_name"],
-            "user_profilePic": post.get("user_profilePic"),
-            "content": post["content"],
-            "image": post.get("image"),
-            "created_at": post["created_at"],
-            "comments": [Comment(**c) for c in post.get("comments", [])],
-            "like_count": like_count,
-            "likes": post.get("likes", []),
-        })
+        result.append(PostOut(
+            id=str(post["_id"]),
+            user_id=post["user_id"],
+            user_name=post["user_name"],
+            user_profilePic=post.get("user_profilePic"),
+            content=post["content"],
+            image=post.get("image"),
+            created_at=post["created_at"],
+            comments=[Comment(**c) for c in post.get("comments", [])],
+            likes=post.get("likes", [])
+        ))
     return result
 
 from fastapi import Body
