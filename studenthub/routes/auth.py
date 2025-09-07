@@ -1,6 +1,5 @@
 import os
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, File, UploadFile
-from fastapi import Form
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, File, UploadFile, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -8,14 +7,14 @@ from datetime import datetime, timedelta
 import bcrypt
 import jwt
 import requests
+import asyncio
 
 from ..models.user import UserCreate, UserLogin, UserOut
 from ..database import db
-from ..utils.otp import generate_otp, get_expiry
+from ..utils.otp import generate_otp
 from ..utils.mail import send_otp_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
 
 # Config/constants
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "dkdqyigl1")
@@ -27,7 +26,11 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 security = HTTPBearer()
 
 
-# ----------------- Utility Functions -----------------
+# ----------------- OTP EXPIRY CONFIG -----------------
+OTP_EXPIRY_SECONDS = 300  # 5 minutes; change as needed
+otp_store = {}  # {email: {"otp": "123456", "expiry": datetime, "user_data": {...}}}
+
+# ----------------- UTILITY -----------------
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -41,72 +44,78 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-
 # ----------------- SIGNUP & OTP -----------------
 class SignupRequest(UserCreate):
     pass
 
-
 class UserOutWithMsg(UserOut):
     message: str
-
 
 class EmailOTP(BaseModel):
     email: EmailStr
     otp: str
 
+# ----------------- OTP EXPIRY HANDLER -----------------
+async def remove_otp_after_expiry(email: str, delay: int = OTP_EXPIRY_SECONDS):
+    await asyncio.sleep(delay)
+    if email in otp_store:
+        del otp_store[email]
+        print(f"DEBUG: OTP for {email} expired and removed from memory.")
 
-@router.post("/signup", response_model=UserOutWithMsg)
+
+@router.post("/signup")
 async def signup(user: SignupRequest, background_tasks: BackgroundTasks):
-    if db.users_v2.find_one({"email": user.email}):
-        raise HTTPException(status_code=400, detail="Email already registered")
+    if db.users_v2.find_one({"email": user.email}) or user.email in otp_store:
+        raise HTTPException(status_code=400, detail="Email already registered or pending verification")
 
     hashed_pw = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt())
     otp = generate_otp()
-    expiry = get_expiry()
 
-    user_doc = {
+    user_data = {
         "name": user.name,
         "bio": user.bio,
         "email": user.email,
         "passwordHash": hashed_pw.decode(),
         "profilePic": None,
-        "isVerified": False,
-        "otp": otp,
-        "otpExpiry": expiry
+        "isVerified": False
     }
-    result = db.users_v2.insert_one(user_doc)
-    background_tasks.add_task(send_otp_email, user.email, otp)
 
-    return UserOutWithMsg(
-        id=str(result.inserted_id),
-        name=user.name,
-        bio=user.bio,
-        email=user.email,
-        isVerified=False,
-        profilePic=None,
-        message="Signup successful. OTP sent to email."
-    )
+    expiry_time = datetime.utcnow() + timedelta(seconds=OTP_EXPIRY_SECONDS)
+    otp_store[user.email] = {"otp": otp, "expiry": expiry_time, "user_data": user_data}
 
+    # Send OTP asynchronously
+    async def send_otp_task(email, otp):
+        print(f"DEBUG: Sending OTP {otp} to {email}")
+        await send_otp_email(email, otp)
+        print(f"DEBUG: OTP sent to {email}")
+
+    background_tasks.add_task(send_otp_task, user.email, otp)
+    # Schedule auto removal after expiry
+    background_tasks.add_task(remove_otp_after_expiry, user.email)
+
+    return {
+        "message": "Signup initiated. OTP sent to email.",
+        "expires_at": expiry_time.isoformat()  # For frontend countdown
+    }
 
 @router.post("/verify-email")
 def verify_email(data: EmailOTP):
-    user_doc = db.users_v2.find_one({"email": data.email})
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User not found")
-    if user_doc.get("isVerified"):
-        return {"message": "Already verified"}
-    if user_doc.get("otp") != data.otp:
+    record = otp_store.get(data.email)
+    if not record:
+        raise HTTPException(status_code=404, detail="No signup found for this email or OTP expired")
+    
+    if record["otp"] != data.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
-    if user_doc.get("otpExpiry") and user_doc["otpExpiry"] < get_expiry(0):
+    
+    if record["expiry"] < datetime.utcnow():
+        del otp_store[data.email]
         raise HTTPException(status_code=400, detail="OTP expired")
+    
+    # Insert user into MongoDB
+    result = db.users_v2.insert_one(record["user_data"])
+    del otp_store[data.email]
 
-    db.users_v2.update_one(
-        {"email": data.email},
-        {"$set": {"isVerified": True, "otp": None, "otpExpiry": None}}
-    )
-    return {"message": "Email verified successfully"}
-
+    return {"message": "Email verified successfully. Signup complete.", "user_id": str(result.inserted_id)}
 
 # ----------------- LOGIN -----------------
 @router.post("/login")
@@ -116,8 +125,6 @@ def login(user: UserLogin):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not bcrypt.checkpw(user.password.encode(), user_doc["passwordHash"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not user_doc.get("isVerified", False):
-        raise HTTPException(status_code=403, detail="Email not verified. Please verify your email before logging in.")
 
     payload = {
         "sub": user_doc["email"],
@@ -138,7 +145,6 @@ def login(user: UserLogin):
         }
     }
 
-
 # ----------------- PROFILE MODULE -----------------
 @router.get("/profile", response_model=UserOut)
 def get_profile(current_user: dict = Depends(get_current_user)):
@@ -150,7 +156,6 @@ def get_profile(current_user: dict = Depends(get_current_user)):
         isVerified=current_user.get("isVerified", False),
         profilePic=current_user.get("profilePic")
     )
-
 
 @router.put("/profile/update", response_model=UserOut)
 async def update_profile(
@@ -166,23 +171,15 @@ async def update_profile(
         update_data["bio"] = bio
 
     if file:
-        # Debug: print env vars
-        print("CLOUDINARY_CLOUD_NAME:", CLOUDINARY_CLOUD_NAME)
-        print("CLOUDINARY_UPLOAD_PRESET:", CLOUDINARY_UPLOAD_PRESET)
-        print("CLOUDINARY_UPLOAD_URL:", CLOUDINARY_UPLOAD_URL)
-        # Validate image type
         if file.content_type not in ["image/jpeg", "image/png"]:
             raise HTTPException(status_code=400, detail="Only JPEG or PNG images allowed")
         files = {"file": (file.filename, file.file, file.content_type)}
         data = {"upload_preset": CLOUDINARY_UPLOAD_PRESET}
         try:
             resp = requests.post(CLOUDINARY_UPLOAD_URL, files=files, data=data)
-            print("Cloudinary status:", resp.status_code)
-            print("Cloudinary response:", resp.text)
             resp.raise_for_status()
             update_data["profilePic"] = resp.json().get("secure_url")
         except Exception as e:
-            print("Cloudinary upload error:", str(e))
             raise HTTPException(status_code=500, detail="Profile picture upload failed")
 
     if update_data:

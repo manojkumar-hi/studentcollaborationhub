@@ -15,6 +15,7 @@ conf = ConnectionConfig(
 )
 
 async def send_otp_email(email: str, otp: str):
+    print(f"DEBUG: Sending OTP {otp} to {email}")
     message = MessageSchema(
         subject="StudentHub Email Verification OTP",
         recipients=[email],
@@ -23,3 +24,4 @@ async def send_otp_email(email: str, otp: str):
     )
     fm = FastMail(conf)
     await fm.send_message(message)
+    print(f"DEBUG: OTP sent to {email}")
