@@ -25,9 +25,8 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 security = HTTPBearer()
 
-
 # ----------------- OTP EXPIRY CONFIG -----------------
-OTP_EXPIRY_SECONDS = 300  # 5 minutes; change as needed
+OTP_EXPIRY_SECONDS = 300  # 5 minutes
 otp_store = {}  # {email: {"otp": "123456", "expiry": datetime, "user_data": {...}}}
 
 # ----------------- UTILITY -----------------
@@ -62,7 +61,6 @@ async def remove_otp_after_expiry(email: str, delay: int = OTP_EXPIRY_SECONDS):
         del otp_store[email]
         print(f"DEBUG: OTP for {email} expired and removed from memory.")
 
-
 @router.post("/signup")
 async def signup(user: SignupRequest, background_tasks: BackgroundTasks):
     if db.users_v2.find_one({"email": user.email}) or user.email in otp_store:
@@ -83,19 +81,17 @@ async def signup(user: SignupRequest, background_tasks: BackgroundTasks):
     expiry_time = datetime.utcnow() + timedelta(seconds=OTP_EXPIRY_SECONDS)
     otp_store[user.email] = {"otp": otp, "expiry": expiry_time, "user_data": user_data}
 
-    # Send OTP asynchronously
     async def send_otp_task(email, otp):
         print(f"DEBUG: Sending OTP {otp} to {email}")
         await send_otp_email(email, otp)
         print(f"DEBUG: OTP sent to {email}")
 
     background_tasks.add_task(send_otp_task, user.email, otp)
-    # Schedule auto removal after expiry
     background_tasks.add_task(remove_otp_after_expiry, user.email)
 
     return {
         "message": "Signup initiated. OTP sent to email.",
-        "expires_at": expiry_time.isoformat()  # For frontend countdown
+        "expires_at": expiry_time.isoformat()
     }
 
 @router.post("/verify-email")
@@ -111,7 +107,6 @@ def verify_email(data: EmailOTP):
         del otp_store[data.email]
         raise HTTPException(status_code=400, detail="OTP expired")
     
-    # Insert user into MongoDB
     result = db.users_v2.insert_one(record["user_data"])
     del otp_store[data.email]
 
@@ -179,12 +174,25 @@ async def update_profile(
             resp = requests.post(CLOUDINARY_UPLOAD_URL, files=files, data=data)
             resp.raise_for_status()
             update_data["profilePic"] = resp.json().get("secure_url")
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Profile picture upload failed")
 
     if update_data:
         db.users_v2.update_one({"_id": current_user["_id"]}, {"$set": update_data})
 
+    user_doc = db.users_v2.find_one({"_id": current_user["_id"]})
+    return UserOut(
+        id=str(user_doc["_id"]),
+        name=user_doc["name"],
+        bio=user_doc.get("bio", ""),
+        email=user_doc["email"],
+        isVerified=user_doc.get("isVerified", False),
+        profilePic=user_doc.get("profilePic")
+    )
+
+@router.put("/profile/remove-pic", response_model=UserOut)
+def remove_profile_pic(current_user: dict = Depends(get_current_user)):
+    db.users_v2.update_one({"_id": current_user["_id"]}, {"$set": {"profilePic": None}})
     user_doc = db.users_v2.find_one({"_id": current_user["_id"]})
     return UserOut(
         id=str(user_doc["_id"]),
